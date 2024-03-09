@@ -22,14 +22,14 @@ vec2 bezqpt(float t, mat3x2 p) {
 
 vec2 bezq_roots(mat3x2 p) {
     float c = p[0].y;
-    float b = 2.*p[1].y;
-    float a = p[2].y + (-2.*p[1].y) - p[0].y;
+    float b = 2.*(p[1].y- p[0].y);
+    float a = p[2].y + (-2.*p[1].y) + p[0].y;
     float under_root = (b*b) - (4.*a*c);
     if (under_root < 0.) {
         return vec2(1./0.);
     }
     float root = pow(under_root, 0.5);
-    vec2 res = vec2(((-b)+root)/(2.*a), ((-b)-root)/(2.*a));
+    vec2 res = vec2((2.*c)/((-b)+root), (2.*c)/((-b)-root));
     return res;
 }
 
@@ -98,7 +98,7 @@ void solid() {
             ctr += 1;
         }
     }
-    if (ctr == 2 ) {
+    if (ctr % 2 == 1) {
         f_color.xyz = vec3(0.5);
     }
 }
