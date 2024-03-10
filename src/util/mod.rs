@@ -1,10 +1,46 @@
-use std::mem::transmute;
+use std::{isize, mem::transmute, ops::Index};
 
 use ttf_parser::{Face, GlyphId, Tag};
 
-#[derive(Debug, Clone)]
+pub struct CircularSlice<'a, T>  where T: Copy{
+    slice: &'a [T]
+}
+impl<'a, T> CircularSlice<'a, T> where T: Copy{
+    pub fn new(slice: &'a[T]) -> Self {
+        if slice.len() > isize::MAX as usize {
+            panic!("slice too big!")
+        }
+        CircularSlice {
+            slice
+        }
+    }
+    pub fn len(&self) -> isize {
+        self.slice.len() as isize
+    }
+}
+impl<T> Index<isize> for CircularSlice<'_, T> where T: Copy{
+    type Output = T;
+
+    fn index(&self, index: isize) -> &Self::Output {
+        let modulo = index.abs() as usize % self.slice.len();
+        if index < 0 && modulo != 0{
+            &self.slice[self.slice.len() - modulo]
+        } else { 
+            &self.slice[modulo]
+        }
+    }
+}
+impl<T> Index<usize> for CircularSlice<'_, T> where T: Copy{
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.slice[index % self.slice.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Point {
     pub on_curve: bool,
+    pub number: usize,
     pub x: isize,
     pub y: isize
 }
@@ -53,10 +89,8 @@ pub fn read_uint16(d: &[u8]) -> u16 {
 }
 
 pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
-    println!("Units per em: {}",font.tables().head.units_per_em);
     let face = font.raw_face();
     let loca = face.table(Tag::from_bytes(b"loca")).unwrap();
-    //let loca = font.raw_face().table(Tag::from_bytes(b"loca")).unwrap();
     let size: usize;
     match font.tables().head.index_to_location_format {
         ttf_parser::head::IndexToLocationFormat::Short => size=2,
@@ -64,7 +98,6 @@ pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
     }
 
     let glyf = face.table(Tag::from_bytes(b"glyf")).unwrap();
-    println!("size:{}", size);
     let index = glyph.0 as usize*size;
     let gindex: usize; 
     let glen: usize;
@@ -105,7 +138,6 @@ pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
         entry = &entry[2..];
         let _instructions = &entry[..instructions_len];
         entry = &entry[instructions_len..];
-        //print!("Contours: {num_contours}\nCoordinate Range: {x_min},{y_min} to {x_max},{y_max}\nNum. points:{num_pts}\nNum. Instructions:{instructions_len}\n");
         let mut ptr = 0;
         let mut logical_pt = 0;
         let mut flag = Flags(0);
@@ -129,7 +161,7 @@ pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
         //xcoords
         let mut accum = 0;
         for i in 0..num_pts{
-            let mut point = Point { on_curve: false, x: 0, y: 0 };
+            let mut point = Point { on_curve: false, number: i, x: 0, y: 0 };
             if flags[i].x_short_vec() {
                 if flags[i].x_is_same_or_positive_short() {
                     accum += entry[ptr] as isize
@@ -161,7 +193,6 @@ pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
             }
             points[i].y=accum;
         }
-        //println!("Points:{:?}", points);
         GlyphData {
             points,
             contour_end_pts: end_pts_of_contours,

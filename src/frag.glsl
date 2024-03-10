@@ -92,13 +92,23 @@ void solid() {
         vec2 rx = bezqpt(roots.x, p);
         vec2 ry = bezqpt(roots.y, p);
         if (roots.x < 1. && roots.x > 0. && rx.x > 0. ) {
-            ctr += 1;
+            vec2 derivative = bezq_deriv(roots.x, p);
+            if (derivative.y > 0.) {
+                ctr += 1;
+            } else {
+                ctr -= 1;
+            }
         }
         if (roots.y < 1. && roots.y > 0. && ry.x > 0. ) {
-            ctr += 1;
+            vec2 derivative = bezq_deriv(roots.y, p);
+            if (derivative.y > 0.) {
+                ctr += 1;
+            } else {
+                ctr -= 1;
+            }
         }
     }
-    if (ctr % 2 == 1) {
+    if (ctr != 0) {
         f_color.xyz = vec3(0.5);
     }
 }
@@ -112,8 +122,8 @@ void main() {
         return;
     }
     solid();
-    outline();
+    /*outline();
     if (distance(tc, vec2(0.25, 0.92)) < 0.01) {
         f_color.x = 1;
-    }
+    }*/
 }
