@@ -1,8 +1,14 @@
 #version 450
 
-
+struct GlyphInfo{
+    uint offset;
+    uint len;
+};
 #define PI 3.14159
 layout(location = 0) in vec2 tex_coords;
+layout(location = 1) flat in uint offset;
+layout(location = 2) flat in uint len;
+
 layout(location = 0) out vec4 f_color;
 
 const int scans = 25;
@@ -10,9 +16,6 @@ const int scans = 25;
 
 layout(set = 0, binding = 0) buffer curve_buf {
     mat3x2[] curves;
-};
-layout(set = 0, binding = 1) buffer len_buf {
-    uint len;
 };
 
 vec2 bezqpt(float t, mat3x2 p) {
@@ -53,7 +56,7 @@ float lmin(float lower, float upper, mat3x2 p, vec2 pt) {
     return k;
 
 }
-
+/*
 void outline() {
     vec2 tc = tex_coords;
     float color = 0.;
@@ -78,13 +81,15 @@ void outline() {
         color += smoothstep(0.005, 0.0, distance(bezqpt(min_t, p), tc));
     }
     f_color.z +=color;
-}
+}*/
 void solid() {
     vec2 tc = tex_coords;
-    float color = 0.;
     int ctr = 0;
-    for (uint i = 0; i < len; i++) {
+    for (uint i = offset; i < offset+len; i++) {
         mat3x2 p = curves[i];
+        p[0].y  = 1. - p[0].y;
+        p[1].y  = 1. - p[1].y;
+        p[2].y  = 1. - p[2].y;
         p[0] -= tc;
         p[1] -= tc;
         p[2] -= tc;
@@ -109,7 +114,7 @@ void solid() {
         }
     }
     if (ctr != 0) {
-        f_color.xyz = vec3(0.5);
+        f_color.xyz = vec3(1.);
     }
 }
 void main() {

@@ -46,6 +46,7 @@ pub struct Point {
 }
 
 pub struct GlyphData {
+    pub id: GlyphId,
     pub points: Vec<Point>,
     pub contour_end_pts: Vec<usize>,
     pub min: (isize, isize),
@@ -88,7 +89,7 @@ pub fn read_uint16(d: &[u8]) -> u16 {
     u16::from_le_bytes(d)
 }
 
-pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
+pub fn get_glyph_entry(glyph: GlyphId, font: &Face<'_>) -> GlyphData {
     let face = font.raw_face();
     let loca = face.table(Tag::from_bytes(b"loca")).unwrap();
     let size: usize;
@@ -194,6 +195,7 @@ pub fn get_glyph_entry(glyph: GlyphId, font: Face<'_>) -> GlyphData {
             points[i].y=accum;
         }
         GlyphData {
+            id: glyph,
             points,
             contour_end_pts: end_pts_of_contours,
             min: (x_min.into(), y_min.into()),

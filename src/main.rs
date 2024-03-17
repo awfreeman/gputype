@@ -1,7 +1,7 @@
 mod util;
 
 use std::{fs::File, io::Read, path::Path};
-use ttf_parser::Face;
+use ttf_parser::{Face, GlyphId};
 
 use std::sync::Arc;
 use vulkano::{
@@ -40,11 +40,12 @@ use vulkano::{
         PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    shader::{ShaderModule, ShaderModuleCreateInfo},
     swapchain::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
     sync::{self, GpuFuture},
-    DeviceSize, Validated, VulkanError, VulkanLibrary,
+    DeviceSize, NonExhaustive, Validated, VulkanError, VulkanLibrary,
 };
 use winit::{
     event::{DeviceEvent, Event, WindowEvent},
@@ -52,14 +53,54 @@ use winit::{
     window::WindowBuilder,
 };
 
+#[repr(C)]
+#[derive(BufferContents)]
+struct GlyphInfo {
+    offset: u32,
+    len: u32,
+}
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct VBuf {
+    #[format(R32_UINT)]
+    index: i32,
+}
+
+mod vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/vertex.glsl"
+    }
+}
+
+mod fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/frag.glsl",
+    }
+}
+
 fn main() {
-    let path = Path::new("NotoSansJP-Regular.ttf");
+    let path = Path::new("LiberationMono-Regular.ttf");
     let mut file = File::open(path).unwrap();
     let mut content = Vec::new();
     file.read_to_end(&mut content).unwrap();
     let font = Face::parse(&content, 0).unwrap();
-    let glyph = font.glyph_index('感').unwrap();
-    let points = util::get_glyph_entry(glyph, font);
+    let string = "Hello12345";
+    assert!(string.len() == 10);
+    let glyph_ids: Vec<GlyphId> = string
+        .chars()
+        .into_iter()
+        .map(|c| font.glyph_index(c).unwrap())
+        .collect();
+    let glyph_info = {
+        let mut vec = Vec::new();
+        for id in glyph_ids {
+            vec.push(util::get_glyph_entry(id, &font))
+        }
+        vec
+    };
     let event_loop = EventLoop::new().unwrap();
 
     let library = VulkanLibrary::new().unwrap();
@@ -90,6 +131,7 @@ fn main() {
     let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
     let device_extensions = DeviceExtensions {
         khr_swapchain: true,
+        ext_provoking_vertex: true,
         ..DeviceExtensions::empty()
     };
     // We then choose which physical device to use. First, we enumerate all the available physical
@@ -194,30 +236,8 @@ fn main() {
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-    #[derive(BufferContents, Vertex)]
-    #[repr(C)]
-    struct Vertex {
-        #[format(R32G32_SFLOAT)]
-        position: [f32; 2],
-    }
-
-    let vertices = [
-        Vertex {
-            position: [-1., -1.],
-        },
-        Vertex {
-            position: [1., -1.],
-        },
-        Vertex { position: [1., 1.] },
-        Vertex { position: [1., 1.] },
-        Vertex {
-            position: [-1., 1.],
-        },
-        Vertex {
-            position: [-1., -1.],
-        },
-    ];
-    let vertex_buffer = Buffer::from_iter(
+    let indicies: Vec<VBuf> = (0..60).map(|index| VBuf { index }).collect();
+    let vertex_buf = Buffer::from_iter(
         memory_allocator.clone(),
         BufferCreateInfo {
             usage: BufferUsage::VERTEX_BUFFER,
@@ -228,64 +248,82 @@ fn main() {
                 | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
-        vertices,
+        indicies,
     )
     .unwrap();
-    let (len_buf, curve_buf) = {
-        let (lx, ly) = points.min;
-        let (hx, hy) = points.max;
-        let interp = |x: isize, y: isize| {
-            [
-                util::inv_lerp(lx as f32, hx as f32, x as f32),
-                util::inv_lerp(ly as f32, hy as f32, y as f32),
-            ]
-        };
-        let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.];
+    let (glyph_meta_buf, curve_buf, offset_buf) = {
         let mut curves = Vec::new();
-        let mut prev = 0;
-        for end in points.contour_end_pts {
-            let contour = &points.points[prev..=end];
-            prev = end + 1;
-            let mut i = 0;
-            while i < contour.len() {
-                let next = &contour[(i + 1) % contour.len()];
-                let curr = &contour[i];
-                let prev = &contour[if i == 0 { contour.len() - 1 } else { i - 1 }];
-                let mut p0;
-                let p1;
-                let mut p2;
-                if !curr.on_curve {
-                    p0 = interp(prev.x, prev.y);
-                    p1 = interp(curr.x, curr.y);
-                    p2 = interp(next.x, next.y);
-                    if !prev.on_curve {
-                        p0 = mid(p0, p1);
-                    }
-                    if !next.on_curve {
-                        p2 = mid(p1, p2);
-                    }
-                    i += 1;
-                } else {
-                    p0 = interp(curr.x, curr.y);
-                    if next.on_curve {
+        let mut meta = Vec::new();
+        let (lx, ly, hx, hy) = {
+            let ((mut lx, mut ly), (mut hx, mut hy)) = (glyph_info[0].min, glyph_info[0].max);
+            for glyph in &glyph_info {
+                lx = lx.min(glyph.min.0);
+                ly = ly.min(glyph.min.1);
+                hx = hx.max(glyph.max.0);
+                hy = hy.max(glyph.max.1);
+            }
+            (lx, ly, hx, hy)
+        };
+        for glyph in glyph_info {
+            let glyph_offset = curves.len() as u32;
+            let interp = |x: isize, y: isize| {
+                [
+                    util::inv_lerp(lx as f32, hx as f32, x as f32),
+                    util::inv_lerp(ly as f32, hy as f32, y as f32),
+                ]
+            };
+            let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.];
+            let mut prev = 0;
+            for end in glyph.contour_end_pts {
+                let contour = &glyph.points[prev..=end];
+                prev = end + 1;
+                let mut i = 0;
+                while i < contour.len() {
+                    let next = &contour[(i + 1) % contour.len()];
+                    let curr = &contour[i];
+                    let prev = &contour[if i == 0 { contour.len() - 1 } else { i - 1 }];
+                    let mut p0;
+                    let p1;
+                    let mut p2;
+                    if !curr.on_curve {
+                        p0 = interp(prev.x, prev.y);
+                        p1 = interp(curr.x, curr.y);
                         p2 = interp(next.x, next.y);
-                        p1 = mid(p0, p2);
-                        i += 1;
-                    } else {
-                        let last = &contour[(i + 2) % contour.len()];
-                        p1 = interp(next.x, next.y);
-                        p2 = interp(last.x, last.y);
-                        if !last.on_curve {
+                        if !prev.on_curve {
+                            p0 = mid(p0, p1);
+                        }
+                        if !next.on_curve {
                             p2 = mid(p1, p2);
                         }
-                        i += 2;
+                        i += 1;
+                    } else {
+                        p0 = interp(curr.x, curr.y);
+                        if next.on_curve {
+                            p2 = interp(next.x, next.y);
+                            p1 = mid(p0, p2);
+                            i += 1;
+                        } else {
+                            let last = &contour[(i + 2) % contour.len()];
+                            p1 = interp(next.x, next.y);
+                            p2 = interp(last.x, last.y);
+                            if !last.on_curve {
+                                p2 = mid(p1, p2);
+                            }
+                            i += 2;
+                        }
                     }
+                    curves.push([p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]]);
                 }
-                curves.push([p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]]);
             }
+            let glyph_len = curves.len() as u32 - glyph_offset;
+            meta.push(GlyphInfo {
+                offset: glyph_offset,
+                len: glyph_len,
+            });
         }
+        let string: Vec<u32> = meta.iter().map(|e| e.offset).collect();
         (
-            Buffer::from_data(
+            Buffer::from_iter(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::STORAGE_BUFFER,
@@ -296,7 +334,7 @@ fn main() {
                         | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                     ..Default::default()
                 },
-                curves.len() as u32,
+                meta,
             )
             .unwrap(),
             Buffer::from_iter(
@@ -313,21 +351,22 @@ fn main() {
                 curves,
             )
             .unwrap(),
+            Buffer::from_iter(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::STORAGE_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                string,
+            )
+            .unwrap(),
         )
     };
-    mod vs {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/vertex.glsl"
-        }
-    }
-
-    mod fs {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/frag.glsl",
-        }
-    }
 
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
@@ -356,7 +395,7 @@ fn main() {
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let vertex_input_state = Vertex::per_vertex()
+        let vertex_input_state = VBuf::per_vertex()
             .definition(&vs.info().input_interface)
             .unwrap();
         let stages = [
@@ -399,13 +438,12 @@ fn main() {
         StandardDescriptorSetAllocator::new(device.clone(), Default::default());
 
     let layout = pipeline.layout().set_layouts().get(0).unwrap();
-    let set = PersistentDescriptorSet::new(
+    let frag_set = PersistentDescriptorSet::new(
         &descriptor_set_allocator,
         layout.clone(),
         [
             WriteDescriptorSet::buffer(0, curve_buf),
-            WriteDescriptorSet::buffer(1, len_buf),
-        ],
+            WriteDescriptorSet::buffer(1, glyph_meta_buf)],
         [],
     )
     .unwrap();
@@ -553,13 +591,13 @@ fn main() {
                         PipelineBindPoint::Graphics,
                         pipeline.layout().clone(),
                         0,
-                        set.clone(),
+                        frag_set.clone(),
                     )
                     .unwrap()
-                    .bind_vertex_buffers(0, vertex_buffer.clone())
+                    .bind_vertex_buffers(0, vertex_buf.clone())
                     .unwrap()
                     // We add a draw command.
-                    .draw(vertex_buffer.len() as u32, 1, 0, 0)
+                    .draw(vertex_buf.len() as u32, 1, 0, 0)
                     .unwrap()
                     // We leave the render pass. Note that if we had multiple subpasses we could
                     // have called `next_subpass` to jump to the next subpass.
