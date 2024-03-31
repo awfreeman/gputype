@@ -1,6 +1,11 @@
 mod util;
 
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    path::Path,
+};
 use ttf_parser::{Face, GlyphId};
 
 use std::sync::Arc;
@@ -48,10 +53,10 @@ use vulkano::{
     DeviceSize, NonExhaustive, Validated, VulkanError, VulkanLibrary,
 };
 use winit::{
-    event::{DeviceEvent, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    event::{DeviceEvent, Event, WindowEvent}, event_loop::{ControlFlow, EventLoop}, raw_window_handle::{HasDisplayHandle, HasWindowHandle}, window::WindowBuilder
 };
+
+use crate::util::get_glyph_entry;
 
 #[repr(C)]
 #[derive(BufferContents)]
@@ -64,7 +69,14 @@ struct GlyphInfo {
 #[repr(C)]
 struct VBuf {
     #[format(R32_UINT)]
-    index: i32,
+    index: u32,
+}
+
+#[derive(BufferContents)]
+#[repr(C)]
+struct PushConstants {
+    resolution_x: i32, 
+    resolution_y: i32,
 }
 
 mod vs {
@@ -87,19 +99,22 @@ fn main() {
     let mut content = Vec::new();
     file.read_to_end(&mut content).unwrap();
     let font = Face::parse(&content, 0).unwrap();
-    let string = "Hello12345";
-    assert!(string.len() == 10);
+    
+    let string = include_str!("lipsum.txt");
+    assert!(string.len() <= 1600);
     let glyph_ids: Vec<GlyphId> = string
         .chars()
         .into_iter()
         .map(|c| font.glyph_index(c).unwrap())
         .collect();
     let glyph_info = {
-        let mut vec = Vec::new();
+        let mut glyph_map = HashMap::new();
         for id in glyph_ids {
-            vec.push(util::get_glyph_entry(id, &font))
+            if !glyph_map.contains_key(&id) {
+                glyph_map.insert(id, get_glyph_entry(id, &font));
+            }
         }
-        vec
+        glyph_map
     };
     let event_loop = EventLoop::new().unwrap();
 
@@ -236,7 +251,9 @@ fn main() {
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-    let indicies: Vec<VBuf> = (0..60).map(|index| VBuf { index }).collect();
+    let indicies: Vec<VBuf> = (0..(string.len() as u32 * 6))
+        .map(|index| VBuf { index })
+        .collect();
     let vertex_buf = Buffer::from_iter(
         memory_allocator.clone(),
         BufferCreateInfo {
@@ -255,73 +272,88 @@ fn main() {
         let mut curves = Vec::new();
         let mut meta = Vec::new();
         let (lx, ly, hx, hy) = {
-            let ((mut lx, mut ly), (mut hx, mut hy)) = (glyph_info[0].min, glyph_info[0].max);
-            for glyph in &glyph_info {
-                lx = lx.min(glyph.min.0);
-                ly = ly.min(glyph.min.1);
-                hx = hx.max(glyph.max.0);
-                hy = hy.max(glyph.max.1);
+            let (mut lx, mut ly, mut hx, mut hy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for glyph in glyph_info.values() {
+                if let Some(glyph) = glyph {
+                    lx = lx.min(glyph.min.0);
+                    ly = ly.min(glyph.min.1);
+                    hx = hx.max(glyph.max.0);
+                    hy = hy.max(glyph.max.1);
+                }
             }
             (lx, ly, hx, hy)
         };
-        for glyph in glyph_info {
-            let glyph_offset = curves.len() as u32;
-            let interp = |x: isize, y: isize| {
-                [
-                    util::inv_lerp(lx as f32, hx as f32, x as f32),
-                    util::inv_lerp(ly as f32, hy as f32, y as f32),
-                ]
-            };
-            let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.];
-            let mut prev = 0;
-            for end in glyph.contour_end_pts {
-                let contour = &glyph.points[prev..=end];
-                prev = end + 1;
-                let mut i = 0;
-                while i < contour.len() {
-                    let next = &contour[(i + 1) % contour.len()];
-                    let curr = &contour[i];
-                    let prev = &contour[if i == 0 { contour.len() - 1 } else { i - 1 }];
-                    let mut p0;
-                    let p1;
-                    let mut p2;
-                    if !curr.on_curve {
-                        p0 = interp(prev.x, prev.y);
-                        p1 = interp(curr.x, curr.y);
-                        p2 = interp(next.x, next.y);
-                        if !prev.on_curve {
-                            p0 = mid(p0, p1);
-                        }
-                        if !next.on_curve {
-                            p2 = mid(p1, p2);
-                        }
-                        i += 1;
-                    } else {
-                        p0 = interp(curr.x, curr.y);
-                        if next.on_curve {
-                            p2 = interp(next.x, next.y);
-                            p1 = mid(p0, p2);
-                            i += 1;
-                        } else {
-                            let last = &contour[(i + 2) % contour.len()];
-                            p1 = interp(next.x, next.y);
-                            p2 = interp(last.x, last.y);
-                            if !last.on_curve {
-                                p2 = mid(p1, p2);
+        let mut font_meta_lookup = HashMap::new();
+        for kv in glyph_info {
+            let glyph = kv.1;
+            let id = kv.0;
+            font_meta_lookup.insert(id, meta.len() as u32);
+            match glyph {
+                Some(glyph) => {
+                    let glyph_offset = curves.len() as u32;
+                    let interp = |x: f64, y: f64| {
+                        [
+                            util::inv_lerp(lx as f32, hx as f32, x as f32),
+                            util::inv_lerp(ly as f32, hy as f32, y as f32),
+                        ]
+                    };
+                    let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.];
+                    let mut prev = 0;
+                    for end in glyph.contour_end_pts {
+                        let contour = &glyph.points[prev..=end];
+                        prev = end + 1;
+                        let mut i = 0;
+                        while i < contour.len() {
+                            let next = &contour[(i + 1) % contour.len()];
+                            let curr = &contour[i];
+                            let prev = &contour[if i == 0 { contour.len() - 1 } else { i - 1 }];
+                            let mut p0;
+                            let p1;
+                            let mut p2;
+                            if !curr.on_curve {
+                                p0 = interp(prev.x, prev.y);
+                                p1 = interp(curr.x, curr.y);
+                                p2 = interp(next.x, next.y);
+                                if !prev.on_curve {
+                                    p0 = mid(p0, p1);
+                                }
+                                if !next.on_curve {
+                                    p2 = mid(p1, p2);
+                                }
+                                i += 1;
+                            } else {
+                                p0 = interp(curr.x, curr.y);
+                                if next.on_curve {
+                                    p2 = interp(next.x, next.y);
+                                    p1 = mid(p0, p2);
+                                    i += 1;
+                                } else {
+                                    let last = &contour[(i + 2) % contour.len()];
+                                    p1 = interp(next.x, next.y);
+                                    p2 = interp(last.x, last.y);
+                                    if !last.on_curve {
+                                        p2 = mid(p1, p2);
+                                    }
+                                    i += 2;
+                                }
                             }
-                            i += 2;
+                            curves.push([p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]]);
                         }
                     }
-                    curves.push([p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]]);
+                    let glyph_len = curves.len() as u32 - glyph_offset;
+                    meta.push(GlyphInfo {
+                        offset: glyph_offset,
+                        len: glyph_len,
+                    });
                 }
+                None => meta.push(GlyphInfo { offset: 0, len: 0 })
             }
-            let glyph_len = curves.len() as u32 - glyph_offset;
-            meta.push(GlyphInfo {
-                offset: glyph_offset,
-                len: glyph_len,
-            });
         }
-        let string: Vec<u32> = meta.iter().map(|e| e.offset).collect();
+        let string: Vec<u32> = string
+            .chars()
+            .into_iter()
+            .map(|c| font_meta_lookup[&font.glyph_index(c).unwrap()])
+            .collect();
         (
             Buffer::from_iter(
                 memory_allocator.clone(),
@@ -443,7 +475,9 @@ fn main() {
         layout.clone(),
         [
             WriteDescriptorSet::buffer(0, curve_buf),
-            WriteDescriptorSet::buffer(1, glyph_meta_buf)],
+            WriteDescriptorSet::buffer(1, glyph_meta_buf),
+            WriteDescriptorSet::buffer(2, offset_buf),
+        ],
         [],
     )
     .unwrap();
@@ -586,6 +620,13 @@ fn main() {
                     .set_viewport(0, [viewport.clone()].into_iter().collect())
                     .unwrap()
                     .bind_pipeline_graphics(pipeline.clone())
+                    .unwrap()
+                    .push_constants(
+                        pipeline.layout().clone(), 
+                        0, PushConstants {
+                            resolution_x: window.inner_size().width as i32,
+                            resolution_y: window.inner_size().height as i32
+                        })
                     .unwrap()
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
